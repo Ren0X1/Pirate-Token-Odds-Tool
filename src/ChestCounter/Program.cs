@@ -250,6 +250,7 @@ if (!showWhatsNew && config.LastVersion != AppInfo.VersionText)
 }
 DateTime? autoCloseAt = null;
 DateTime? fortniteClosedSince = null;
+var userQuit = false;   // closed by the player (tray menu, quit button): the standby does not open it again
 FileSystemWatcher? watcher = null;
 var watcherFired = false;
 var nextScan = DateTime.UtcNow.AddSeconds(2);
@@ -375,7 +376,7 @@ if (gui)
         // CHESTCOUNTER_GUI_TAB (development): the tab the window opens on.
         var startUrl = guiServer.Url + "&w=1" + (Environment.GetEnvironmentVariable("CHESTCOUNTER_GUI_TAB") is { Length: > 0 } startTab ? "#" + startTab : "");
         GuiWindow.Start(startUrl, Path.Combine(store.Folder, "webview"), $"{appName} {AppInfo.VersionText}", startHidden: auto,
-            quit: () => { quit = true; wake.Set(); },
+            quit: () => { userQuit = true; quit = true; wake.Set(); },
             closeQuestion: () => L.T("Fermer Pirate Shop Tracker ?\n\nTes prochaines parties ne seront comptées qu'à sa prochaine ouverture.",
                 "Close Pirate Shop Tracker?\n\nYour next matches will only be counted when it is opened again.",
                 "¿Cerrar Pirate Shop Tracker?\n\nTus próximas partidas solo se contarán cuando se vuelva a abrir."),
@@ -520,6 +521,10 @@ while (!quit)
 }
 
 watcher?.Dispose();
+if (userQuit && !uninstalled && OperatingSystem.IsWindows())
+{
+    FortniteWatch.MarkClosedByUser(store.Folder);
+}
 if (OperatingSystem.IsWindows())
 {
     NativeOverlay.Stop();
@@ -797,6 +802,11 @@ void CheckAutoClose()
         return;
     }
     fortniteClosedSince ??= now;
+    // Closed for good, not restarting: while Fortnite starts or updates, its processes close and open again for a moment.
+    if (now - fortniteClosedSince < TimeSpan.FromSeconds(90))
+    {
+        return;
+    }
     // Wait for the last match to be counted (at most 5 minutes, in case a replay was left unfinished by a crash).
     var lastMatchDone = !tracker.IsLive && !tracker.HasPending && !tracker.IsFinishing;
     if (!lastMatchDone && now - fortniteClosedSince < TimeSpan.FromMinutes(5))
@@ -1122,7 +1132,7 @@ object? RunGuiAction(string name, System.Text.Json.JsonElement value)
         case "openIssues": Open(AppInfo.IssuesUrl); settingsChanged = false; break;
         case "openRepo": Open(AppInfo.RepoUrl); settingsChanged = false; break;
         case "uninstall": result = UninstallNow(Bool()); settingsChanged = false; break;
-        case "quit": quit = true; settingsChanged = false; break;
+        case "quit": userQuit = true; quit = true; settingsChanged = false; break;
         default: settingsChanged = false; break;
     }
     if (settingsChanged)

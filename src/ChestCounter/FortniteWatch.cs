@@ -15,9 +15,55 @@ public static class FortniteWatch
 {
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string RunValue = "PirateShopTracker";
-    // CHESTCOUNTER_GAME_PROCESS: another process name, to test the standby without Fortnite.
+    // Every process of a Fortnite session, not only the game itself: while Fortnite starts (or restarts after an update),
+    // FortniteBootstrapper → FortniteLauncher → the anti-cheat wrapper → FortniteClient-Win64-Shipping follow one another,
+    // and the game process can close and open again. Watching only the game made the tool believe Fortnite had closed.
+    // CHESTCOUNTER_GAME_PROCESS: other process names (comma separated), to test the standby without Fortnite.
     private static readonly string[] GameProcesses =
-        { Environment.GetEnvironmentVariable("CHESTCOUNTER_GAME_PROCESS") is { Length: > 0 } test ? test : "FortniteClient-Win64-Shipping" };
+        Environment.GetEnvironmentVariable("CHESTCOUNTER_GAME_PROCESS") is { Length: > 0 } test
+            ? test.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            : new[]
+            {
+                "FortniteClient-Win64-Shipping", "FortniteClient-Win64-Shipping_EAC_EOS", "FortniteClient-Win64-Shipping_EAC",
+                "FortniteClient-Win64-Shipping_BE", "FortniteLauncher", "FortniteBootstrapper",
+            };
+
+    /// <summary>File written when the player closes the tool on purpose: the standby does not open it again then.</summary>
+    public const string ClosedByUserFile = "closed-by-user";
+
+    /// <summary>Marks a close asked by the player (tray menu, quit button), so that the standby leaves it closed.</summary>
+    public static void MarkClosedByUser(string dataDir)
+    {
+        try { File.WriteAllText(Path.Combine(dataDir, ClosedByUserFile), DateTime.UtcNow.Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture)); } catch { }
+    }
+
+    private static bool ClosedByUserSince(string dataDir, DateTime sinceUtc)
+    {
+        try
+        {
+            var path = Path.Combine(dataDir, ClosedByUserFile);
+            return File.Exists(path) && long.TryParse(File.ReadAllText(path).Trim(), out var ticks) && new DateTime(ticks, DateTimeKind.Utc) >= sinceUtc;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool InstanceOpen(string dataDir)
+    {
+        if (Mutex.TryOpenExisting(AppInfo.InstanceMutexFor(dataDir), out var open))
+        {
+            open.Dispose();
+            return true;
+        }
+        return false;
+    }
+
+    private static void StartAuto(string exe, string dataDir)
+    {
+        try { Process.Start(new ProcessStartInfo(exe, $"--auto {DataArg(dataDir)}") { UseShellExecute = false })?.Dispose(); } catch { }
+    }
 
     public static bool IsFortniteRunning()
     {
@@ -39,7 +85,7 @@ public static class FortniteWatch
 
     /// <summary>
     /// Turns "start with Fortnite" on or off: entry at Windows logon + standby started or stopped right away.
-    /// Returns false when it cannot be done (tool not run from ChestCounter.exe).
+    /// Returns false when it cannot be done (tool not run from its exe).
     /// </summary>
     public static bool Apply(bool enabled, string dataDir)
     {
@@ -134,21 +180,26 @@ public static class FortniteWatch
                 return 0;
             }
 
-            if (Mutex.TryOpenExisting(AppInfo.InstanceMutexFor(dataDir), out var open))
+            var sessionStart = DateTime.UtcNow;
+            if (!InstanceOpen(dataDir))
             {
-                open.Dispose(); // the tool is already open
-            }
-            else
-            {
-                try { Process.Start(new ProcessStartInfo(exe, $"--auto {DataArg(dataDir)}") { UseShellExecute = false })?.Dispose(); } catch { }
+                StartAuto(exe, dataDir);
             }
 
-            // Arm again only for the next Fortnite launch (the player may have closed the tool on purpose).
+            // While Fortnite runs, the tool stays open: if it is gone (closed too early, crashed...), it is opened again,
+            // unless the player closed it on purpose during this session. A few times at most (never a launch loop).
+            var reopened = 0;
             while (IsFortniteRunning())
             {
                 if (stop.WaitOne(TimeSpan.FromSeconds(10)))
                 {
                     return 0;
+                }
+                if (reopened < 5 && IsFortniteRunning() && !InstanceOpen(dataDir) && !ClosedByUserSince(dataDir, sessionStart)
+                    && new Store(dataDir).LoadConfig() is not { StartWithFortnite: false })
+                {
+                    reopened++;
+                    StartAuto(exe, dataDir);
                 }
             }
             GC.Collect();
